@@ -1,0 +1,7 @@
+akiec|Actinic Keratosis
+bcc|Basal Cell Carcinoma
+bkl|Benign Keratosis
+df|Dermatofibroma
+mel|Melanoma
+nv|Melanocytic Nevi (Mole)
+vasc|Vascular Lesion

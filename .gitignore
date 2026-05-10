@@ -1,0 +1,15 @@
+# Ignore datasets and large training files
+HAM10000/
+HAM10000_images_part_1/
+HAM10000_images_part_2/
+images/
+*.csv
+HAM10000.zip
+
+# Ignore the training script (cloud only needs the API)
+train_model.py
+
+# Ignore Python cache and virtual environments
+__pycache__/
+venv/
+.env
