@@ -207,10 +207,9 @@ def get_classes():
 # ─────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     print("\n" + "=" * 55)
-    print("  Skin Disease API  —  http://localhost:5000")
-    print("  Endpoints:")
-    print("    POST /predict  — analyze a skin image")
-    print("    GET  /health   — server status")
-    print("    GET  /classes  — list all conditions")
+    print("  Skin Disease API Server Starting...")
     print("=" * 55 + "\n")
-    app.run(host='0.0.0.0', port=5000, debug=False)
+    
+    # Grab the dynamic port from Render, or use 5000 if running locally
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
