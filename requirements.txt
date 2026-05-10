@@ -1,4 +1,4 @@
-tensorflow-cpu==2.13.0
+tensorflow-cpu
 flask==3.0.0
 flask-cors==4.0.0
 pillow==10.0.1
