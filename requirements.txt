@@ -1,9 +1,10 @@
-tensorflow-cpu
+# Deployment/runtime deps for api.py only — kept minimal so this
+# fits inside Render's free-tier memory limit. Training happens in
+# Google Colab (see the pip install cell at the top of train_model.py),
+# so training-only libs (tensorflow, pandas, scikit-learn, matplotlib,
+# seaborn) are intentionally NOT listed here.
 flask
 flask-cors
 pillow
 numpy
-pandas
-scikit-learn
-matplotlib
-seaborn
+ai-edge-litert

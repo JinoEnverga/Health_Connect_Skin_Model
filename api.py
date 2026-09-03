@@ -1,13 +1,18 @@
 # ============================================================
 #  api.py — Flask REST API for Skin Disease Prediction
 #
-#  Serves best_model_final.keras (EfficientNetB3 transfer
-#  learning) trained on the skin-disease-datasaet/ dataset:
-#  8 classes of bacterial, fungal, parasitic & viral skin
-#  infections.
+#  Serves best_model_final.tflite (a quantized export of the
+#  EfficientNetB3 transfer-learning model trained in Colab on
+#  the skin-disease-datasaet/ dataset — 8 classes of bacterial,
+#  fungal, parasitic & viral skin infections).
+#
+#  Runs on the lightweight ai-edge-litert interpreter instead of
+#  full TensorFlow, which is what makes this fit inside Render's
+#  512MB free-tier memory limit — full TF + the raw .keras model
+#  alone can exceed that before a single request is served.
 #
 #  Files expected alongside this script:
-#    - best_model_final.keras
+#    - best_model_final.tflite
 #    - class_labels.txt
 #
 #  RUN LOCALLY:
@@ -19,15 +24,16 @@
 import io
 import logging
 import os
+import threading
 
 import numpy as np
+from ai_edge_litert.interpreter import Interpreter
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from PIL import Image
-from tensorflow import keras
 
 # ── Config ──────────────────────────────────────────────────
-MODEL_PATH  = os.environ.get('MODEL_PATH', 'best_model_final.keras')
+MODEL_PATH  = os.environ.get('MODEL_PATH', 'best_model_final.tflite')
 LABELS_PATH = os.environ.get('LABELS_PATH', 'class_labels.txt')
 IMG_SIZE    = (224, 224)
 MAX_FILE_MB = 10
@@ -55,8 +61,12 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 CORS(app)  # allow requests from your frontend (e.g. React on localhost:5173)
 
-model = None
-label_list: list[str] = []     # e.g. ['ba-cellulitis', 'ba-impetigo', ...] — index order = model output order
+interpreter   = None
+input_index   = None
+output_index  = None
+predict_lock  = threading.Lock()  # tflite Interpreter isn't safe for concurrent invoke() calls
+
+label_list: list[str] = []        # e.g. ['ba-cellulitis', 'ba-impetigo', ...] — index order = model output order
 class_names: dict[str, str] = {}  # e.g. {'ba-cellulitis': 'Bacterial Infection - Cellulitis', ...}
 
 
@@ -78,24 +88,34 @@ def load_labels(path: str) -> None:
 
 
 def load_model(path: str):
+    """Load the .tflite model into a TFLite interpreter."""
     if not os.path.exists(path):
         raise FileNotFoundError(f"Model file not found: {path}")
-    m = keras.models.load_model(path)
+    interp = Interpreter(model_path=path)
+    interp.allocate_tensors()
     logger.info("Model loaded from %s", path)
-    return m
+    return interp
 
 
 def preprocess_image(file_bytes: bytes) -> np.ndarray:
     """Decode + resize an uploaded image into the model's expected input.
 
-    NOTE: best_model_final.keras bundles EfficientNetB3's own preprocessing
-    (Rescaling + ImageNet Normalization) as the first layers of the model,
-    so raw 0-255 pixel values must be passed in here — do NOT divide by 255.
+    NOTE: best_model_final.tflite bundles EfficientNetB3's own preprocessing
+    (Rescaling + ImageNet Normalization) as part of the graph, so raw 0-255
+    pixel values must be passed in here — do NOT divide by 255.
     """
     img = Image.open(io.BytesIO(file_bytes)).convert('RGB')
     img = img.resize(IMG_SIZE, Image.LANCZOS)
     arr = np.array(img, dtype=np.float32)
     return np.expand_dims(arr, axis=0)  # shape: (1, 224, 224, 3)
+
+
+def run_inference(arr: np.ndarray) -> np.ndarray:
+    """Run one forward pass through the TFLite interpreter and return softmax probs."""
+    with predict_lock:
+        interpreter.set_tensor(input_index, arr)
+        interpreter.invoke()
+        return interpreter.get_tensor(output_index)[0]
 
 
 def build_prediction(probs: np.ndarray) -> dict:
@@ -142,7 +162,9 @@ def build_prediction(probs: np.ndarray) -> dict:
 
 # ── Load model & labels once, at startup ───────────────────
 load_labels(LABELS_PATH)
-model = load_model(MODEL_PATH)
+interpreter  = load_model(MODEL_PATH)
+input_index  = interpreter.get_input_details()[0]['index']
+output_index = interpreter.get_output_details()[0]['index']
 
 
 # ─────────────────────────────────────────────────────────────
@@ -163,7 +185,7 @@ def predict():
 
     try:
         arr   = preprocess_image(file_bytes)
-        probs = model.predict(arr, verbose=0)[0]
+        probs = run_inference(arr)
     except Exception as e:
         logger.error("Prediction failed: %s", e)
         return jsonify({'error': f'Could not process the image: {e}'}), 500

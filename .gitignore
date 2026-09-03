@@ -1,13 +1,11 @@
-# Ignore datasets and large training files
-HAM10000/
-HAM10000_images_part_1/
-HAM10000_images_part_2/
-images/
-*.csv
-HAM10000.zip
+# Ignore the dataset (large; retrieve/regenerate separately)
 skin-disease-datasaet/
 
-# Ignore the training script (cloud only needs the API)
+# Ignore the full-precision source model — only the quantized
+# best_model_final.tflite is needed for deployment
+best_model_final.keras
+
+# Ignore the training script (cloud deployment only needs the API)
 train_model.py
 
 # Ignore Python cache and virtual environments
