@@ -1,7 +1,8 @@
-akiec|Actinic Keratosis
-bcc|Basal Cell Carcinoma
-bkl|Benign Keratosis
-df|Dermatofibroma
-mel|Melanoma
-nv|Melanocytic Nevi (Mole)
-vasc|Vascular Lesion
+ba-cellulitis|Bacterial Infection - Cellulitis
+ba-impetigo|Bacterial Infection - Impetigo
+fu-athlete-foot|Fungal Infection - Athlete's Foot
+fu-nail-fungus|Fungal Infection - Nail Fungus
+fu-ringworm|Fungal Infection - Ringworm
+pa-cutaneous-larva-migrans|Parasitic Infection - Cutaneous Larva Migrans
+vi-chickenpox|Viral Infection - Chickenpox
+vi-shingles|Viral Infection - Shingles

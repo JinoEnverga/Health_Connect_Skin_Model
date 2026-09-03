@@ -5,6 +5,7 @@ HAM10000_images_part_2/
 images/
 *.csv
 HAM10000.zip
+skin-disease-datasaet/
 
 # Ignore the training script (cloud only needs the API)
 train_model.py

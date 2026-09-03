@@ -1,110 +1,155 @@
 # ============================================================
-#  api.py  — Flask REST API for Skin Disease Prediction
-#  Place this file in your skin_model/ folder alongside
-#  skin_model.h5 and class_labels.txt
+#  api.py — Flask REST API for Skin Disease Prediction
 #
-#  HOW TO RUN:
-#    pip install flask flask-cors tensorflow pillow
+#  Serves best_model_final.keras (EfficientNetB3 transfer
+#  learning) trained on the skin-disease-datasaet/ dataset:
+#  8 classes of bacterial, fungal, parasitic & viral skin
+#  infections.
+#
+#  Files expected alongside this script:
+#    - best_model_final.keras
+#    - class_labels.txt
+#
+#  RUN LOCALLY:
+#    pip install -r requirements.txt
 #    python api.py
-#
-#  The server starts at: http://localhost:5000
-#  Your React app calls: http://localhost:5000/predict
+#    -> served at http://localhost:5000
 # ============================================================
 
-import os
 import io
-import json
 import logging
-import numpy as np
+import os
 
-from flask import Flask, request, jsonify
+import numpy as np
+from flask import Flask, jsonify, request
 from flask_cors import CORS
 from PIL import Image
-
-# Lazy-load TensorFlow to speed up startup
-import tensorflow as tf
 from tensorflow import keras
+
+# ── Config ──────────────────────────────────────────────────
+MODEL_PATH  = os.environ.get('MODEL_PATH', 'best_model_final.keras')
+LABELS_PATH = os.environ.get('LABELS_PATH', 'class_labels.txt')
+IMG_SIZE    = (224, 224)
+MAX_FILE_MB = 10
+
+ARCHITECTURE = 'EfficientNetB3 (Transfer Learning)'
+DATASET_NAME = 'Skin Disease Dataset — bacterial, fungal, parasitic & viral infections'
+
+# Human-readable risk info shown alongside a prediction.
+# Codes must match class_labels.txt exactly.
+RISK_MAP = {
+    'ba-cellulitis':              {'level': 'HIGH',     'color': '#dc2626', 'advice': 'See a doctor promptly — cellulitis is a bacterial infection that can spread quickly and may need oral or IV antibiotics.'},
+    'vi-shingles':                {'level': 'HIGH',     'color': '#dc2626', 'advice': 'See a doctor as soon as possible — early antiviral treatment reduces the risk of complications, especially if the rash is near the eyes.'},
+    'ba-impetigo':                {'level': 'MODERATE', 'color': '#d97706', 'advice': 'Consult a doctor. Impetigo is a contagious bacterial infection that usually clears up with topical or oral antibiotics.'},
+    'pa-cutaneous-larva-migrans': {'level': 'MODERATE', 'color': '#d97706', 'advice': 'See a doctor. This parasitic skin infection typically requires antiparasitic medication to clear.'},
+    'vi-chickenpox':              {'level': 'MODERATE', 'color': '#d97706', 'advice': 'Consult a doctor, especially for adults, infants, or anyone immunocompromised. Chickenpox is contagious and usually resolves on its own in healthy children.'},
+    'fu-ringworm':                {'level': 'LOW',      'color': '#16a34a', 'advice': 'Usually treatable with over-the-counter antifungal cream. See a doctor if it spreads or does not improve in a few weeks.'},
+    'fu-athlete-foot':            {'level': 'LOW',      'color': '#16a34a', 'advice': 'Usually treatable with over-the-counter antifungal cream and good foot hygiene. See a doctor if it persists or worsens.'},
+    'fu-nail-fungus':             {'level': 'LOW',      'color': '#16a34a', 'advice': 'Not dangerous but can be persistent. See a doctor or podiatrist for antifungal treatment options.'},
+}
 
 # ── Setup ───────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
-CORS(app)  # Allow requests from your React app on localhost:5173
+CORS(app)  # allow requests from your frontend (e.g. React on localhost:5173)
 
-# ── Config ──────────────────────────────────────────────────
-MODEL_PATH  = 'skin_model.h5'
-LABELS_PATH = 'class_labels.txt'
-IMG_SIZE    = (224, 224)
-MAX_FILE_MB = 10
+model = None
+label_list: list[str] = []     # e.g. ['ba-cellulitis', 'ba-impetigo', ...] — index order = model output order
+class_names: dict[str, str] = {}  # e.g. {'ba-cellulitis': 'Bacterial Infection - Cellulitis', ...}
 
-# ── Load model & class labels on startup ────────────────────
-model       = None
-label_list  = []    # e.g. ['akiec', 'bcc', 'bkl', 'df', 'mel', 'nv', 'vasc']
-class_names = {}    # e.g. {'mel': 'Melanoma', ...}
 
-def load_model_and_labels():
-    global model, label_list, class_names
+def load_labels(path: str) -> None:
+    """Parse class_labels.txt (format: `code|Readable Name` per line)."""
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Labels file not found: {path}")
 
-    # Load labels
-    if not os.path.exists(LABELS_PATH):
-        raise FileNotFoundError(
-            f"Labels file not found: {LABELS_PATH}\n"
-            "Run train_model.py first to generate it."
-        )
-    with open(LABELS_PATH) as f:
+    label_list.clear()
+    class_names.clear()
+    with open(path, encoding='utf-8') as f:
         for line in f.read().strip().splitlines():
             code, name = line.split('|', 1)
-            label_list.append(code.strip())
-            class_names[code.strip()] = name.strip()
-    logger.info(f"Loaded {len(label_list)} classes: {label_list}")
+            code = code.strip()
+            label_list.append(code)
+            class_names[code] = name.strip()
 
-    # Load Keras model
-    if not os.path.exists(MODEL_PATH):
-        raise FileNotFoundError(
-            f"Model file not found: {MODEL_PATH}\n"
-            "Run train_model.py first to generate it."
-        )
-    model = keras.models.load_model(MODEL_PATH)
-    logger.info("Model loaded successfully!")
-
-# Call on startup
-with app.app_context():
-    load_model_and_labels()
+    logger.info("Loaded %d classes: %s", len(label_list), label_list)
 
 
-# ─────────────────────────────────────────────────────────────
-# Helper — preprocess an uploaded image
-# ─────────────────────────────────────────────────────────────
+def load_model(path: str):
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Model file not found: {path}")
+    m = keras.models.load_model(path)
+    logger.info("Model loaded from %s", path)
+    return m
+
+
 def preprocess_image(file_bytes: bytes) -> np.ndarray:
+    """Decode + resize an uploaded image into the model's expected input.
+
+    NOTE: best_model_final.keras bundles EfficientNetB3's own preprocessing
+    (Rescaling + ImageNet Normalization) as the first layers of the model,
+    so raw 0-255 pixel values must be passed in here — do NOT divide by 255.
+    """
     img = Image.open(io.BytesIO(file_bytes)).convert('RGB')
     img = img.resize(IMG_SIZE, Image.LANCZOS)
-    arr = np.array(img, dtype=np.float32) / 255.0
-    return np.expand_dims(arr, axis=0)     # shape: (1, 224, 224, 3)
+    arr = np.array(img, dtype=np.float32)
+    return np.expand_dims(arr, axis=0)  # shape: (1, 224, 224, 3)
+
+
+def build_prediction(probs: np.ndarray) -> dict:
+    """Turn a raw softmax vector into the API's response payload."""
+    top_idx  = int(np.argmax(probs))
+    top_code = label_list[top_idx]
+    top_conf = float(probs[top_idx])
+    risk     = RISK_MAP.get(top_code, {})
+
+    all_scores = sorted(
+        (
+            {
+                'code':       code,
+                'label':      class_names.get(code, code),
+                'confidence': round(float(probs[i]) * 100, 2),
+            }
+            for i, code in enumerate(label_list)
+        ),
+        key=lambda x: x['confidence'],
+        reverse=True,
+    )
+
+    return {
+        'prediction': {
+            'code':       top_code,
+            'label':      class_names.get(top_code, top_code),
+            'confidence': round(top_conf * 100, 2),
+            'risk_level': risk.get('level', 'UNKNOWN'),
+            'risk_color': risk.get('color', '#6b7280'),
+            'advice':     risk.get('advice', 'Please consult a doctor or dermatologist.'),
+        },
+        'all_scores': all_scores,
+        'disclaimer': (
+            'This result is AI-generated and is NOT a medical diagnosis. '
+            'Always consult a qualified doctor or dermatologist for proper evaluation.'
+        ),
+        'model_info': {
+            'architecture': ARCHITECTURE,
+            'dataset':      DATASET_NAME,
+            'classes':      len(label_list),
+        },
+    }
+
+
+# ── Load model & labels once, at startup ───────────────────
+load_labels(LABELS_PATH)
+model = load_model(MODEL_PATH)
 
 
 # ─────────────────────────────────────────────────────────────
-# Helper — build a human-readable risk level
-# ─────────────────────────────────────────────────────────────
-RISK_MAP = {
-    'mel':   {'level': 'HIGH',     'color': '#dc2626', 'advice': 'See a dermatologist urgently — melanoma can be life-threatening if not treated early.'},
-    'bcc':   {'level': 'MODERATE', 'color': '#d97706', 'advice': 'Schedule a dermatology appointment soon. Basal cell carcinoma is treatable when caught early.'},
-    'akiec': {'level': 'MODERATE', 'color': '#d97706', 'advice': 'Consult a dermatologist. Actinic keratosis can progress to cancer if untreated.'},
-    'nv':    {'level': 'LOW',      'color': '#16a34a', 'advice': 'Melanocytic nevi are usually benign. Monitor for changes (size, color, shape) and visit a dermatologist annually.'},
-    'bkl':   {'level': 'LOW',      'color': '#16a34a', 'advice': 'Benign keratosis is generally harmless. See a dermatologist if it changes or becomes irritated.'},
-    'df':    {'level': 'LOW',      'color': '#16a34a', 'advice': 'Dermatofibroma is benign. No treatment needed unless it causes discomfort.'},
-    'vasc':  {'level': 'LOW',      'color': '#16a34a', 'advice': 'Vascular lesions are usually benign. Consult a dermatologist if the appearance changes.'},
-}
-
-
-# ─────────────────────────────────────────────────────────────
-# POST /predict
-# Accepts: multipart/form-data with an 'image' file field
-# Returns: JSON with predicted class, confidence, and all scores
+# POST /predict — multipart/form-data with an 'image' file field
 # ─────────────────────────────────────────────────────────────
 @app.route('/predict', methods=['POST'])
 def predict():
-    # ── Validate request ──────────────────────────────────────
     if 'image' not in request.files:
         return jsonify({'error': 'No image file provided. Use field name "image".'}), 400
 
@@ -116,77 +161,38 @@ def predict():
     if len(file_bytes) > MAX_FILE_MB * 1024 * 1024:
         return jsonify({'error': f'File too large. Max size: {MAX_FILE_MB}MB'}), 413
 
-    # ── Preprocess & predict ──────────────────────────────────
     try:
         arr   = preprocess_image(file_bytes)
         probs = model.predict(arr, verbose=0)[0]
     except Exception as e:
-        logger.error(f"Prediction failed: {e}")
-        return jsonify({'error': f'Could not process the image: {str(e)}'}), 500
+        logger.error("Prediction failed: %s", e)
+        return jsonify({'error': f'Could not process the image: {e}'}), 500
 
-    # ── Build response ────────────────────────────────────────
-    top_idx  = int(np.argmax(probs))
-    top_code = label_list[top_idx]
-    top_conf = float(probs[top_idx])
-    risk     = RISK_MAP.get(top_code, {})
-
-    # All class scores sorted by confidence
-    all_scores = sorted(
-        [
-            {
-                'code':       code,
-                'label':      class_names.get(code, code),
-                'confidence': round(float(probs[i]) * 100, 2),
-            }
-            for i, code in enumerate(label_list)
-        ],
-        key=lambda x: x['confidence'],
-        reverse=True,
-    )
-
-    response = {
-        'prediction': {
-            'code':         top_code,
-            'label':        class_names.get(top_code, top_code),
-            'confidence':   round(top_conf * 100, 2),
-            'risk_level':   risk.get('level', 'UNKNOWN'),
-            'risk_color':   risk.get('color', '#6b7280'),
-            'advice':       risk.get('advice', 'Please consult a dermatologist.'),
-        },
-        'all_scores':   all_scores,
-        'disclaimer':   (
-            'This result is AI-generated and is NOT a medical diagnosis. '
-            'Always consult a qualified dermatologist for proper evaluation.'
-        ),
-        'model_info': {
-            'architecture': 'EfficientNetB3 (Transfer Learning)',
-            'dataset':      'HAM10000 — 10,015 dermoscopy images',
-            'classes':      len(label_list),
-        },
-    }
-
+    response = build_prediction(probs)
     logger.info(
-        f"Predicted: {top_code} ({class_names.get(top_code)}) "
-        f"— confidence {top_conf*100:.1f}%"
+        "Predicted: %s (%s) — confidence %.1f%%",
+        response['prediction']['code'],
+        response['prediction']['label'],
+        response['prediction']['confidence'],
     )
     return jsonify(response), 200
 
 
 # ─────────────────────────────────────────────────────────────
-# GET /health  — simple health check
+# GET /health — simple health check
 # ─────────────────────────────────────────────────────────────
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({
         'status':  'running',
-        'model':   'skin_model.h5',
+        'model':   os.path.basename(MODEL_PATH),
         'classes': len(label_list),
         'labels':  class_names,
     }), 200
 
 
 # ─────────────────────────────────────────────────────────────
-# GET /classes  — list all supported skin conditions
+# GET /classes — list all supported skin conditions
 # ─────────────────────────────────────────────────────────────
 @app.route('/classes', methods=['GET'])
 def get_classes():
@@ -202,14 +208,10 @@ def get_classes():
     }), 200
 
 
-# ─────────────────────────────────────────────────────────────
-# Run
-# ─────────────────────────────────────────────────────────────
 if __name__ == '__main__':
     print("\n" + "=" * 55)
     print("  Skin Disease API Server Starting...")
     print("=" * 55 + "\n")
-    
-    # Grab the dynamic port from Render, or use 5000 if running locally
-    port = int(os.environ.get('PORT', 5000))
+
+    port = int(os.environ.get('PORT', 5000))  # Render provides PORT; default 5000 locally
     app.run(host='0.0.0.0', port=port, debug=False)
